@@ -46,8 +46,11 @@ print_usage() {
   -p|--port         SSH port. Default 22
   -q|--quiet        don't display progress
   -c|--clone        use clone instead of seed
+  -e|--noretry      do not retry and exit on send failure
   -n|--parentdirs   number of parent directories to recreate
+  -r|--dryrun       dryrun
   -v|--verbose      display more information
+    |--debug        display debug information
   -h|--help         show usage
 
 <src> can either be a single snapshot, or a folder containing snapshots
@@ -65,6 +68,8 @@ chmod +x /etc/cron.daily/btrfs-sync
 
 echov() { if [[ "$VERBOSE" == 1 ]]; then echo "$@"; fi }
 
+echod() { if [[ "$DEBUG" == 1 ]]; then echo "$@"; fi }
+
 #----------------------------------------------------------------------------------------------------------
 
 # preliminary checks
@@ -78,8 +83,11 @@ PORT=22
 ZIP=cat PIZ=cat
 SILENT=">/dev/null"
 PARENT_DIRS=0
+NO_RETRY=0
+DRY_RUN=0
+DEBUG=0
 
-OPTS=$( getopt -o hcqzZk:p:n:dv -l quiet -l help -l clone -l xz -l pbzip2 -l keep: -l port: -l parentdirs: -l delete -l verbose -- "$@" 2>/dev/null )
+OPTS=$( getopt -o hceqzZrk:p:n:dv -l quiet -l help -l clone -l xz -l pbzip2 -l keep: -l port: -l parentdirs: -l delete -l verbose -l noretry -l dryrun -l debug -- "$@" 2>/dev/null )
 [[ $? -ne 0 ]] && { echo "error parsing arguments"; exit 1; }
 eval set -- "$OPTS"
 
@@ -92,6 +100,9 @@ while true; do
     -k|--keep       ) KEEP=$2           ; shift 2 ;;
     -p|--port       ) PORT=$2           ; shift 2 ;;
     -n|--parentdirs ) PARENT_DIRS=$2    ; shift 2 ;;
+    -e|--noretry    ) NO_RETRY=1        ; shift 1 ;;
+    -r|--dryrun     ) DRY_RUN=1         ; shift 1 ;;
+       --debug      ) DEBUG=1           ; shift 1 ;;
     -z|--xz         ) ZIP=xz     PIZ=( xz     -d ); shift 1 ;;
     -Z|--pbzip2     ) ZIP=pbzip2 PIZ=( pbzip2 -d ); shift 1 ;;
     -v|--verbose    ) SILENT=""  VERBOSE=1        ; shift 1 ;;
@@ -127,6 +138,10 @@ ${DST_CMD[@]} test -x "$DST" &>/dev/null || {
   [[ "$SSH" != "" ]] && echo "SSH access error to $NET. Do you have passwordless login setup, and adequate permissions for $DST?"
   [[ "$SSH" == "" ]] && echo "Access error. Do you have adequate permissions for $DST?"
   exit 1
+}
+
+[[ "$DRY_RUN" == "1" ]] && {
+  echo "INFO: Dry-Run"
 }
 
 #----------------------------------------------------------------------------------------------------------
@@ -219,8 +234,11 @@ choose_seed() {      # sets SEED
     SEED=$(
       for id in "${DST_UUIDS[@]}"; do
         # try to match by UUID
-        local PATH_=$( awk "{ if ( \$14 == \"$id\" ) print \$16       }" <<<"$LIST" )
-        local DATE=$(  awk "{ if ( \$14 == \"$id\" ) print \$11, \$12 }" <<<"$LIST" )
+        local PATH_=""
+        local DATE=""
+
+        # local PATH_=$( awk "{ if ( \$14 == \"$id\" ) print \$16       }" <<<"$LIST" )
+        # local DATE=$(  awk "{ if ( \$14 == \"$id\" ) print \$11, \$12 }" <<<"$LIST" )
 
         # try to match by received UUID, only if necessary
         [[ "$PATH_" == "" ]] && {
@@ -302,26 +320,29 @@ sync_snapshot() {
   [[ "$SEED_ARG" != "" ]] && echov -n " using seed '$SEED'"
   echo "..."
 
-  # echo ""
-  # echo "Args:"
-  # echo "${SEED_ARG[@]} ${CLONE_ARGS[@]}"
-  # echo "Dests:"
-  # echo "${DSTS[@]}"
-  # echo "-----------------------------------------------"
-  # echo "$SRC" "->" "$DST_PATH"
+  echod ""
+  echod "Args:"
+  echod "${SEED_ARG[@]} ${CLONE_ARGS[@]}"
+  # echod "Dests:"
+  # echod "${DSTS[@]}"
+  # echod "-----------------------------------------------"
+  echod "$SRC" "->" "$DST_PATH"
+  echod "-----------------------------------------------"
   # return 0;
 
-  "${DST_CMD[@]}" mkdir -p \"$DST_PATH\" \
-  && "${SRC_CMD[@]}" \
-      sudo btrfs send -q ${SEED_ARG[@]} ${CLONE_ARGS[@]} "$SRC" \
-        | "$ZIP" \
-        | "${PV[@]}" \
-        | "${DST_CMD[@]}" "${PIZ[@]} | sudo btrfs receive \"$DST_PATH\" 2>&1 |(grep -v -e'^At subvol ' -e'^At snapshot '||true)" \
-        || {
-          "${DST_CMD[@]}" sudo btrfs subvolume delete "$DST_PATH"/"$( basename "$SRC" )" 2>/dev/null
-          echo "ERROR: Sync Failed"
-          return 1;
-        }
+  [[ "$DRY_RUN" != "1" ]] && {
+    "${DST_CMD[@]}" mkdir -p \"$DST_PATH\" \
+      && "${SRC_CMD[@]}" \
+          sudo btrfs send -q ${SEED_ARG[@]} ${CLONE_ARGS[@]} "$SRC" \
+            | "$ZIP" \
+            | "${PV[@]}" \
+            | "${DST_CMD[@]}" "${PIZ[@]} | sudo btrfs receive \"$DST_PATH\" 2>&1 |(grep -v -e'^At subvol ' -e'^At snapshot '||true)" \
+            || {
+              "${DST_CMD[@]}" sudo btrfs subvolume delete "$DST_PATH"/"$( basename "$SRC" )" 2>/dev/null
+              echo "ERROR: Sync Failed"
+              return 1;
+            }
+  }
 
   # update DST list
   DSTS+=("$DST_PATH$( basename "$SRC" )")
@@ -359,6 +380,7 @@ get_dst_snapshots "$DST" # sets DSTS DST_UUIDS
 
 for src in "${SRCS[@]}"; do
   sync_snapshot "$src" && RET=0 || RET=1
+  [[ "$RET" == "1" ]] && [[ "$NO_RETRY" == "1" ]] && { echo "Abort"; exit 1; }
   for i in $(seq 1 2); do
     [[ "$RET" != "1" ]] && break
     echo "* Retrying '$src'..."
@@ -373,10 +395,13 @@ done
 [[ "$KEEP" != 0 ]] && \
   [[ ${#DSTS[@]} -gt $KEEP ]] && \
   echov "* Pruning old snapshots..." && \
+  echod "* Pruning old snapshots..." && \
   for (( i=0; i < $(( ${#DSTS[@]} - KEEP )); i++ )); do
     PRUNE_LIST+=( "${DSTS[$i]}" )
   done && \
-  ${DST_CMD[@]} sudo btrfs subvolume delete "${PRUNE_LIST[@]}" $SILENT
+  echod "${PRUNE_LIST[@]}" && \
+  [[ "$DRY_RUN" != "1" ]] && \
+    ${DST_CMD[@]} sudo btrfs subvolume delete "${PRUNE_LIST[@]}" $SILENT
 
 # delete flag
 [[ "$DELETE" == 1 ]] && \
@@ -389,7 +414,10 @@ done
   done
 [[ "$DEL_LIST" != "" ]] && \
   echov "* Deleting non existent snapshots..." && \
-  ${DST_CMD[@]} sudo btrfs subvolume delete "${DEL_LIST[@]}" $SILENT
+  echod "* Deleting non existent snapshots..." && \
+  echod "${DEL_LIST[@]}" && \
+  [[ "$DRY_RUN" != "1" ]] && \
+   ${DST_CMD[@]} sudo btrfs subvolume delete "${DEL_LIST[@]}" $SILENT
 
 exit 0
 
