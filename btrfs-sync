@@ -45,6 +45,8 @@ print_usage() {
   -Z|--pbzip2       use pbzip2 compression. Saves bandwidth, but uses all CPUs
   -p|--port         SSH port. Default 22
   -q|--quiet        don't display progress
+  -c|--clone        use clone instead of seed
+  -n|--parentdirs   number of parent directories to recreate
   -v|--verbose      display more information
   -h|--help         show usage
 
@@ -75,21 +77,24 @@ KEEP=0
 PORT=22
 ZIP=cat PIZ=cat
 SILENT=">/dev/null"
+PARENT_DIRS=0
 
-OPTS=$( getopt -o hqzZk:p:dv -l quiet -l help -l xz -l pbzip2 -l keep: -l port: -l delete -l verbose -- "$@" 2>/dev/null )
+OPTS=$( getopt -o hcqzZk:p:n:dv -l quiet -l help -l clone -l xz -l pbzip2 -l keep: -l port: -l parentdirs: -l delete -l verbose -- "$@" 2>/dev/null )
 [[ $? -ne 0 ]] && { echo "error parsing arguments"; exit 1; }
 eval set -- "$OPTS"
 
 while true; do
   case "$1" in
-    -h|--help   ) print_usage; exit  0 ;;
-    -q|--quiet  ) QUIET=1    ; shift 1 ;;
-    -d|--delete ) DELETE=1   ; shift 1 ;;
-    -k|--keep   ) KEEP=$2    ; shift 2 ;;
-    -p|--port   ) PORT=$2    ; shift 2 ;;
-    -z|--xz     ) ZIP=xz     PIZ=( xz     -d ); shift 1 ;;
-    -Z|--pbzip2 ) ZIP=pbzip2 PIZ=( pbzip2 -d ); shift 1 ;;
-    -v|--verbose) SILENT=""  VERBOSE=1        ; shift 1 ;;
+    -h|--help       ) print_usage; exit  0 ;;
+    -q|--quiet      ) QUIET=1           ; shift 1 ;;
+    -c|--clone      ) CLONE=1           ; shift 1 ;;
+    -d|--delete     ) DELETE=1          ; shift 1 ;;
+    -k|--keep       ) KEEP=$2           ; shift 2 ;;
+    -p|--port       ) PORT=$2           ; shift 2 ;;
+    -n|--parentdirs ) PARENT_DIRS=$2    ; shift 2 ;;
+    -z|--xz         ) ZIP=xz     PIZ=( xz     -d ); shift 1 ;;
+    -Z|--pbzip2     ) ZIP=pbzip2 PIZ=( pbzip2 -d ); shift 1 ;;
+    -v|--verbose    ) SILENT=""  VERBOSE=1        ; shift 1 ;;
     --)                shift;  break   ;;
   esac
 done
@@ -170,34 +175,47 @@ PV=( pv -F"time elapsed [%t] | rate %r | total size [%b]" )
 
 #----------------------------------------------------------------------------------------------------------
 
+center_dirname() {
+  echo $1 | awk -F / -v n=$2 '
+    { o = $NF; for (f=1; f<n; f++) o = $(NF-f) "/" o; print o }
+  '
+}
+
 # sync snapshots
 
 get_dst_snapshots() {      # sets DSTS DST_UUIDS
-  local DST="$1"
+  local _dst="${1%/}"
   unset DSTS DST_UUIDS
+
+  for i in $(eval echo "{0..$PARENT_DIRS}"); do
+      _dst+="/*"
+  done
+
   while read entry; do
     DST_UUIDS+=( "$( sed 's=|.*==' <<<"$entry" )" )
     DSTS+=(      "$( sed 's=.*|==' <<<"$entry" )" )
   done < <(
     "${DST_CMD[@]}" "
-      DSTS=( \$( ls -d \"$DST\"/* 2>/dev/null ) )
+      DSTS=( \$( ls -d $_dst 2>/dev/null ) )
       for dst in \${DSTS[@]}; do
         UUID=\$( sudo btrfs su sh \"\$dst\" 2>/dev/null | grep 'Received UUID' | awk '{ print \$3 }' )
         [[ \"\$UUID\" == \"-\" ]] || [[ \"\$UUID\" == \"\" ]] && continue
         echo \"\$UUID|\$dst\"
       done"
   )
+  # echo "${DSTS[@]}"
+  # exit 1
 }
 
 choose_seed() {      # sets SEED
-  local SRC="$1"
+  local _src="$1"
 
   SEED="$SEED_NEXT"
   if [[ "$SEED" == "" ]]; then
     # try to get most recent src snapshot that exists in dst to use as a seed
     local RXID_CALCULATED=0
     declare -A PATH_RXID DATE_RXID SHOWP RXIDP DATEP
-    local LIST="$( "${SRC_CMD[@]}" sudo btrfs subvolume list -su "$SRC" )"
+    local LIST="$( "${SRC_CMD[@]}" sudo btrfs subvolume list -su "$_src" )"
     SEED=$(
       for id in "${DST_UUIDS[@]}"; do
         # try to match by UUID
@@ -207,9 +225,9 @@ choose_seed() {      # sets SEED
         # try to match by received UUID, only if necessary
         [[ "$PATH_" == "" ]] && {
           [[ "$RXID_CALCULATED" == "0" ]] && { # create table during the first iteration if needed
-            local PATHS=( $( "${SRC_CMD[@]}" sudo btrfs su list -u "$SRC" | awk '{ print $11 }' ) )
+            local PATHS=( $( "${SRC_CMD[@]}" sudo btrfs su list -u "$_src" | awk '{ print $11 }' ) )
             for p in "${PATHS[@]}"; do
-              SHOWP="$( "${SRC_CMD[@]}" sudo btrfs su sh "$( dirname "$SRC" )/$( basename "$p" )" 2>/dev/null )"
+              SHOWP="$( "${SRC_CMD[@]}" sudo btrfs su sh "$( dirname "$_src" )/$( basename "$p" )" 2>/dev/null )"
               RXIDP="$( grep 'Received UUID' <<<"$SHOWP" | awk '{ print $3     }' )"
               DATEP="$( grep 'Creation time' <<<"$SHOWP" | awk '{ print $3, $4 }' )"
               [[ "$RXIDP" == "" ]] && continue
@@ -222,7 +240,7 @@ choose_seed() {      # sets SEED
            DATE="${DATE_RXID["$id"]}"
         }
 
-        [[ "$PATH_" == "" ]] || [[ "$PATH_" == "$( basename "$SRC" )" ]] && continue
+        [[ "$PATH_" == "" ]] || [[ "$PATH_" == "$( basename "$_src" )" ]] && continue
 
         local SECS=$( date -d "$DATE" +"%s" )
         echo "$SECS|$PATH_"
@@ -232,7 +250,8 @@ choose_seed() {      # sets SEED
 }
 
 exists_at_dst() {
-  local SHOW="$( "${SRC_CMD[@]}" sudo btrfs subvolume show "$SRC" )"
+  local local_src=$1
+  local SHOW="$( "${SRC_CMD[@]}" sudo btrfs subvolume show "$local_src" )"
 
   local SRC_UUID="$( grep 'UUID:' <<<"$SHOW" | head -1 | awk '{ print $2 }' )"
   grep -q "$SRC_UUID" <<<"${DST_UUIDS[@]}" && return 0;
@@ -247,6 +266,7 @@ exists_at_dst() {
 ## sync incrementally
 sync_snapshot() {
   local SRC="$1"
+  local DST_PATH="$DST"
   "${SRC_CMD[@]}" test -d "$SRC" || return
 
   exists_at_dst "$SRC" && { echov "* Skip existing '$SRC'"; return 0; }
@@ -254,6 +274,7 @@ sync_snapshot() {
   choose_seed "$SRC"  # sets SEED
 
   # incremental sync argument
+  # [[ "$CLONE" != "1" ]] && 
   [[ "$SEED" != "" ]] && {
     local SEED_PATH="$( dirname "$SRC" )/$( basename $SEED )"
     "${SRC_CMD[@]}" test -d "$SEED_PATH" &&
@@ -261,25 +282,66 @@ sync_snapshot() {
       echo "INFO: couldn't find $SEED_PATH. Non-incremental mode"
   }
 
+  [[ "$CLONE" == "1" ]] && {
+    echo "INFO: clone mode"
+    # unset SEED_ARG
+    local -a CLONE_ARGS=()
+
+    for tmp in "${CLONE_SRCS[@]}"; do
+      CLONE_ARGS+=( -c "$tmp" )
+    done
+  }
+
+  [[ "$PARENT_DIRS" != 0 ]] && {
+    local out=$(center_dirname "$(dirname $SRC)" $PARENT_DIRS)
+    DST_PATH+="$out/"
+  }
+
   # do it
   echo -n "* Synchronizing '$src'"
   [[ "$SEED_ARG" != "" ]] && echov -n " using seed '$SEED'"
   echo "..."
 
-  "${SRC_CMD[@]}" \
-  sudo btrfs send -q ${SEED_ARG[@]} "$SRC" \
-    | "$ZIP" \
-    | "${PV[@]}" \
-    | "${DST_CMD[@]}" "${PIZ[@]} | sudo btrfs receive \"$DST\" 2>&1 |(grep -v -e'^At subvol ' -e'^At snapshot '||true)" \
-    || {
-      "${DST_CMD[@]}" sudo btrfs subvolume delete "$DST"/"$( basename "$SRC" )" 2>/dev/null
-      return 1;
-    }
+  # echo ""
+  # echo "Args:"
+  # echo "${SEED_ARG[@]} ${CLONE_ARGS[@]}"
+  # echo "Dests:"
+  # echo "${DSTS[@]}"
+  # echo "-----------------------------------------------"
+  # echo "$SRC" "->" "$DST_PATH"
+  # return 0;
+
+  "${DST_CMD[@]}" mkdir -p \"$DST_PATH\" \
+  && "${SRC_CMD[@]}" \
+      sudo btrfs send -q ${SEED_ARG[@]} ${CLONE_ARGS[@]} "$SRC" \
+        | "$ZIP" \
+        | "${PV[@]}" \
+        | "${DST_CMD[@]}" "${PIZ[@]} | sudo btrfs receive \"$DST_PATH\" 2>&1 |(grep -v -e'^At subvol ' -e'^At snapshot '||true)" \
+        || {
+          "${DST_CMD[@]}" sudo btrfs subvolume delete "$DST_PATH"/"$( basename "$SRC" )" 2>/dev/null
+          echo "ERROR: Sync Failed"
+          return 1;
+        }
 
   # update DST list
-  DSTS+=("$DST/$( basename "$SRC" )")
+  DSTS+=("$DST_PATH$( basename "$SRC" )")
   DST_UUIDS+=("$SRC_UUID")
+  CLONE_SRCS+=("$SRC")
   SEED_NEXT="$SRC"
+}
+
+get_clone_srcs() { #sets CLONE_SRCS
+  unset CLONE_SRCS
+  declare -ga CLONE_SRCS
+  
+  for clone_src in "${SRCS[@]}"; do
+    "${SRC_CMD[@]}" test -d "$clone_src" || continue
+
+    exists_at_dst "$clone_src" && CLONE_SRCS+=( "$clone_src" )
+  done
+
+  # echo "${CLONE_SRCS[@]}"
+  return 0
 }
 
 #----------------------------------------------------------------------------------------------------------
@@ -287,6 +349,14 @@ sync_snapshot() {
 # sync all snapshots found in src
 echov "* Check destination"
 get_dst_snapshots "$DST" # sets DSTS DST_UUIDS
+# echo "$DST"
+# echo "${DSTS[@]}"
+# echo "${DST_UUIDS[@]}"
+[[ "$CLONE" == "1" ]] && {
+  echov "* Get clone sources"
+  get_clone_srcs
+}
+
 for src in "${SRCS[@]}"; do
   sync_snapshot "$src" && RET=0 || RET=1
   for i in $(seq 1 2); do
