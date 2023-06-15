@@ -66,9 +66,9 @@ chmod +x /etc/cron.daily/btrfs-sync
 "
 }
 
-echov() { if [[ "$VERBOSE" == 1 ]]; then echo "$@"; fi }
+echov() { if [[ "$VERBOSE" == 1 ]]; then echo "$@" >&2; fi }
 
-echod() { if [[ "$DEBUG" == 1 ]]; then echo "$@"; fi }
+echod() { if [[ "$DEBUG" == 1 ]]; then echo "$@" >&2; fi }
 
 #----------------------------------------------------------------------------------------------------------
 
@@ -317,7 +317,7 @@ sync_snapshot() {
 
   # do it
   echo -n "* Synchronizing '$src'"
-  [[ "$SEED_ARG" != "" ]] && echov -n " using seed '$SEED'"
+  [[ "$SEED_ARG" != "" ]] && echov -n " using seed '$SEED'" || echov -n " non-incremental "
   echo "..."
 
   echod ""
@@ -328,6 +328,7 @@ sync_snapshot() {
   # echod "-----------------------------------------------"
   echod "$SRC" "->" "$DST_PATH"
   echod "-----------------------------------------------"
+  echod ""
   # return 0;
 
   [[ "$DRY_RUN" != "1" ]] && {
