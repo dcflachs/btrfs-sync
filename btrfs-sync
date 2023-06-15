@@ -46,6 +46,7 @@ print_usage() {
   -p|--port         SSH port. Default 22
   -q|--quiet        don't display progress
   -c|--clone        use clone instead of seed
+    |--seednxt      assume snapshots are sequential when looking for seeds
   -e|--noretry      do not retry and exit on send failure
   -n|--parentdirs   number of parent directories to recreate
   -r|--dryrun       dryrun
@@ -87,7 +88,7 @@ NO_RETRY=0
 DRY_RUN=0
 DEBUG=0
 
-OPTS=$( getopt -o hceqzZrk:p:n:dv -l quiet -l help -l clone -l xz -l pbzip2 -l keep: -l port: -l parentdirs: -l delete -l verbose -l noretry -l dryrun -l debug -- "$@" 2>/dev/null )
+OPTS=$( getopt -o hceqzZrk:p:n:dv -l quiet -l help -l clone -l xz -l pbzip2 -l keep: -l port: -l parentdirs: -l delete -l verbose -l noretry -l dryrun -l debug -l seednxt -- "$@" 2>/dev/null )
 [[ $? -ne 0 ]] && { echo "error parsing arguments"; exit 1; }
 eval set -- "$OPTS"
 
@@ -96,6 +97,7 @@ while true; do
     -h|--help       ) print_usage; exit  0 ;;
     -q|--quiet      ) QUIET=1           ; shift 1 ;;
     -c|--clone      ) CLONE=1           ; shift 1 ;;
+       --seednxt    ) SEED_INCR=1       ; shift 1 ;;    
     -d|--delete     ) DELETE=1          ; shift 1 ;;
     -k|--keep       ) KEEP=$2           ; shift 2 ;;
     -p|--port       ) PORT=$2           ; shift 2 ;;
@@ -225,7 +227,11 @@ get_dst_snapshots() {      # sets DSTS DST_UUIDS
 choose_seed() {      # sets SEED
   local _src="$1"
 
-  SEED="$SEED_NEXT"
+  SEED=""
+
+  [[ "$SEED_INCR" == "1" ]] && SEED="$SEED_NEXT"
+
+
   if [[ "$SEED" == "" ]]; then
     # try to get most recent src snapshot that exists in dst to use as a seed
     local RXID_CALCULATED=0
@@ -233,12 +239,12 @@ choose_seed() {      # sets SEED
     local LIST="$( "${SRC_CMD[@]}" sudo btrfs subvolume list -su "$_src" )"
     SEED=$(
       for id in "${DST_UUIDS[@]}"; do
-        # try to match by UUID
-        local PATH_=""
-        local DATE=""
+        [[ "$id" == "" ]] && continue  
 
-        # local PATH_=$( awk "{ if ( \$14 == \"$id\" ) print \$16       }" <<<"$LIST" )
-        # local DATE=$(  awk "{ if ( \$14 == \"$id\" ) print \$11, \$12 }" <<<"$LIST" )
+        # try to match by UUID
+
+        local PATH_=$( awk "{ if ( \$14 == \"$id\" ) print \$16       }" <<<"$LIST" )
+        local DATE=$(  awk "{ if ( \$14 == \"$id\" ) print \$11, \$12 }" <<<"$LIST" )
 
         # try to match by received UUID, only if necessary
         [[ "$PATH_" == "" ]] && {
@@ -254,8 +260,9 @@ choose_seed() {      # sets SEED
             done
             RXID_CALCULATED=1
           }
+
           PATH_="${PATH_RXID["$id"]}"
-           DATE="${DATE_RXID["$id"]}"
+          DATE="${DATE_RXID["$id"]}"
         }
 
         [[ "$PATH_" == "" ]] || [[ "$PATH_" == "$( basename "$_src" )" ]] && continue
@@ -271,7 +278,7 @@ exists_at_dst() {
   local local_src=$1
   local SHOW="$( "${SRC_CMD[@]}" sudo btrfs subvolume show "$local_src" )"
 
-  local SRC_UUID="$( grep 'UUID:' <<<"$SHOW" | head -1 | awk '{ print $2 }' )"
+  SRC_UUID="$( grep 'UUID:' <<<"$SHOW" | head -1 | awk '{ print $2 }' )"
   grep -q "$SRC_UUID" <<<"${DST_UUIDS[@]}" && return 0;
 
   local SRC_RXID="$( grep 'Received UUID' <<<"$SHOW"   | awk '{ print $3 }' )"
