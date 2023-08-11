@@ -18,6 +18,8 @@
 # <src> can either be a single snapshot, or a folder containing snapshots
 # <user> requires privileged permissions at <host> for the 'btrfs' command
 #
+# Use SIGQUIT ( ctrl + \ ) to bail out before next transaction
+#
 # Cron example: daily synchronization over the internet, keep only last 50
 #
 # cat > /etc/cron.daily/btrfs-sync <<EOF
@@ -47,6 +49,7 @@ print_usage() {
   -q|--quiet        don't display progress
   -c|--clone        use clone instead of seed
     |--seednxt      assume snapshots are sequential when looking for seeds
+    |--nodirect     skip non-incremental transfers
   -e|--noretry      do not retry and exit on send failure
   -n|--parentdirs   number of parent directories to recreate
   -r|--dryrun       dryrun
@@ -87,8 +90,10 @@ PARENT_DIRS=0
 NO_RETRY=0
 DRY_RUN=0
 DEBUG=0
+ABORT=false
+NO_DIRECT=0
 
-OPTS=$( getopt -o hceqzZrk:p:n:dv -l quiet -l help -l clone -l xz -l pbzip2 -l keep: -l port: -l parentdirs: -l delete -l verbose -l noretry -l dryrun -l debug -l seednxt -- "$@" 2>/dev/null )
+OPTS=$( getopt -o hceqzZrk:p:n:dv -l quiet -l help -l clone -l xz -l pbzip2 -l keep: -l port: -l parentdirs: -l delete -l verbose -l noretry -l dryrun -l debug -l seednxt -l nodirect -- "$@" 2>/dev/null )
 [[ $? -ne 0 ]] && { echo "error parsing arguments"; exit 1; }
 eval set -- "$OPTS"
 
@@ -97,7 +102,8 @@ while true; do
     -h|--help       ) print_usage; exit  0 ;;
     -q|--quiet      ) QUIET=1           ; shift 1 ;;
     -c|--clone      ) CLONE=1           ; shift 1 ;;
-       --seednxt    ) SEED_INCR=1       ; shift 1 ;;    
+       --seednxt    ) SEED_INCR=1       ; shift 1 ;;
+       --nodirect   ) NO_DIRECT=1       ; shift 1 ;;
     -d|--delete     ) DELETE=1          ; shift 1 ;;
     -k|--keep       ) KEEP=$2           ; shift 2 ;;
     -p|--port       ) PORT=$2           ; shift 2 ;;
@@ -346,6 +352,7 @@ sync_snapshot() {
   }
 
   # do it
+  [[ "$NO_DIRECT" != 0 ]] && [[ "$SEED_ARG" == "" ]] && { echov -n "Skipping non-incremental '$src'"; return 0; }
   echo -n "* Synchronizing '$src'"
   [[ "$SEED_ARG" != "" ]] && echov -n " using seed '$SEED'" || echov -n " non-incremental "
   echo "..."
@@ -409,9 +416,12 @@ get_dst_snapshots "$DST" # sets DSTS DST_UUIDS
   get_clone_srcs
 }
 
+trap ABORT=true SIGQUIT
+
 for src in "${SRCS[@]}"; do
   sync_snapshot "$src" && RET=0 || RET=1
   [[ "$RET" == "1" ]] && [[ "$NO_RETRY" == "1" ]] && { echo "Abort"; exit 1; }
+  [[ "$ABORT" == true ]] && { echo "Abort"; exit 0; }
   for i in $(seq 1 2); do
     [[ "$RET" != "1" ]] && break
     echo "* Retrying '$src'..."
