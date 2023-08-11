@@ -237,7 +237,14 @@ choose_seed() {      # sets SEED
     local RXID_CALCULATED=0
     declare -A PATH_RXID DATE_RXID SHOWP RXIDP DATEP
     local LIST="$( "${SRC_CMD[@]}" sudo btrfs subvolume list -su "$_src" )"
-    SEED=$(
+
+    SHOWP="$( "${SRC_CMD[@]}" sudo btrfs su sh "$_src" 2>/dev/null )"
+    local PARENT_UUID="$( grep 'Parent UUID' <<<"$SHOWP" | awk '{ print $3     }' )"
+
+    # echov "${DST_UUIDS[@]}"
+    # echov "$(awk "{ print \$14 }" <<<"$LIST")"
+    local SEED_LIST=()
+    readarray -t SEED_LIST <<< $(
       for id in "${DST_UUIDS[@]}"; do
         [[ "$id" == "" ]] && continue  
 
@@ -268,9 +275,25 @@ choose_seed() {      # sets SEED
         [[ "$PATH_" == "" ]] || [[ "$PATH_" == "$( basename "$_src" )" ]] && continue
 
         local SECS=$( date -d "$DATE" +"%s" )
-        echo "$SECS|$PATH_"
+        echo "$SECS|$PATH_|$id|"
+      done
+    )
+
+    SEED=$(
+      for s in "${SEED_LIST[@]}"; do
+        # echov "$( echo $s | cut -f3 -d'|')"
+        [[ "$PARENT_UUID" == "$( echo $s | cut -f3 -d'|')" ]] && echo "$s"
       done | sort -V | tail -1 | cut -f2 -d'|'
     )
+    # echov $SEED
+
+    [[ "$SEED" == "" ]] && {
+      SEED=$(
+        for s in "${SEED_LIST[@]}"; do
+          echo "$s"
+        done | sort -V | tail -1 | cut -f2 -d'|'
+      )
+    }
   fi
 }
 
